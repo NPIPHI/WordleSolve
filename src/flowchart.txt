@@ -1,0 +1,140 @@
+#![feature(portable_simd)]
+
+mod guess_matcher;
+mod word;
+mod test;
+
+
+use std::fs;
+use std::simd::*;
+use rayon::prelude::*;
+use crate::guess_matcher::GuessMatcher;
+use crate::word::*;
+use std::iter::FromIterator;
+
+fn best_guess(possible_guesses: &[u8x8], possible_answers: &[u8x8], filters: &[GuessMatcher]) -> Vec<u8x8> {
+    let answers_count: Vec<u8x32> = possible_answers.iter().map(|x|to_count(*x)).collect();
+
+    let pre_filtered : Vec<bool> = possible_answers.iter().zip(answers_count.iter())
+        .map(|(&ans, &ans_count)|
+            filters.iter().all(|f|
+                f.matches_fast(ans, ans_count)
+            )).collect();
+
+    let avg_matched: Vec<usize> = possible_guesses.par_iter().map(
+        //for every potential guess
+        |&word| {
+
+            //for every possible answer
+            let others_matched = possible_answers.iter()
+                .map(|&ans| {
+                    for matcher in filters {
+                        if !matcher.matches(ans) {
+                            return 0;
+                        }
+                    }
+                    let matcher = GuessMatcher::from_guess(word, ans);
+
+                    possible_answers.iter().zip(answers_count.iter()).zip(pre_filtered.iter())
+                        .filter(|(_,&c)| c)
+                        .filter(
+                            |((&ans, &ans_count), _)|
+                                matcher.matches_fast(ans, ans_count)
+                        ).count()
+                })
+                .sum();
+
+            if filters.iter().all(|f|f.matches(word)) {
+                return others_matched - 1;
+            } else {
+                return others_matched;
+            }
+        }
+    ).collect();
+
+
+    let mut best_pairs: Vec<(usize, u8x8)> = avg_matched.iter().zip(possible_guesses).map(|(&a,&b)|(a,b)).collect();
+    best_pairs.sort_by_key(|(a,_b)| *a);
+    return best_pairs.iter().map(|(_a,b)| *b).collect();
+}
+
+fn link(start_node: &str, start_name: &str, link: &str, end_node: &str, end_name: &str) -> String {
+    return format!("N{}{{{}}} --> |{}| N{}{{{}}}\n", start_node, start_name, link, end_node, end_name);
+}
+
+fn all_perms() -> Vec<String> {
+    let letters = ['0', '1', '2'];
+
+    let mut ret: Vec<String> = Vec::new();
+
+    for _0 in letters {
+        for _1 in letters {
+            for _2 in letters {
+                for _3 in letters {
+                    for _4 in letters {
+                        ret.push(String::from_iter([_0,_1,_2,_3,_4].iter()));
+                    }
+                }
+            }
+        }
+    }
+
+    return ret;
+}
+
+fn flowchart_recur(word: u8x8, used_perms: &[&str], filters: &[GuessMatcher], words: &[u8x8], answers: &[u8x8]) -> (String, bool) {
+    let possible_answers: Vec<u8x8> = answers.iter().filter(|&&ans| filters.iter().all(|m| m.matches(ans))).map(|&x|x).collect();
+    if possible_answers.len() == 1 {
+        return (String::new(), true);
+    } else if possible_answers.len() == 0 {
+        return (String::new(), false);
+    }
+
+    let perms = all_perms();
+
+    let mut string = String::new();
+    for perm in &perms {
+
+
+        let filter = GuessMatcher::from_result(word, perm.as_str()).unwrap();
+        let mut all_filters = filters.to_vec();
+        all_filters.push(filter);
+        let mut all_used_perms = used_perms.to_vec();
+        all_used_perms.push(perm.as_str());
+        let guess = best_guess(words, possible_answers.as_slice(), all_filters.as_slice());
+        let used_perms_str: String = used_perms.into_iter().fold(String::new(), |a,b| a + b);
+        let combined_perms_str = used_perms_str.clone() + &perm;
+
+        let (links, non_empty) = flowchart_recur(guess[0], &all_used_perms, all_filters.as_slice(), words, possible_answers.as_slice());
+
+        if non_empty {
+            string += &link(&used_perms_str, &u8_to_string(word),&perm, &combined_perms_str, &u8_to_string(guess[0]));
+            string += &links;
+        }
+    }
+
+    return (string, true);
+}
+
+fn flowchart(start: u8x8, words: &[u8x8], answers: &[u8x8]) -> String {
+    let s = String::from("graph TD\n");
+    return s + flowchart_recur(start, &[], &[], words, answers).0.as_str();
+}
+
+fn main() {
+    let answers_str = fs::read_to_string("data/Answers.txt").expect("Couldn't open answers.txt");
+    let guesses_str = fs::read_to_string("data/Guesses.txt").expect("Couldn't open guesses.txt");
+    let answers: Vec<u8x8> = split(answers_str.as_str());
+    let guesses = split(guesses_str.as_str());
+    let all_words : Vec<u8x8> = answers.iter().chain(guesses.iter()).map(|&x|x).collect();
+
+    println!("{}", flowchart(to_word("orate"), &all_words, &answers))
+}
+
+fn u8_to_string(word: u8x8) -> String {
+    let mut chars = [0;5];
+    for i in 0..5 {
+        chars[i] = word[i];
+    }
+    return std::str::from_utf8(&chars).unwrap().into();
+}
